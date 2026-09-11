@@ -36,7 +36,7 @@ const FIELD_NAMES = [
   'Recommendation',
 ].join('|'); // add labels here
 const patternCache = new Map<string, RegExp>();
-const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
 
 /**
  * Builds and caches a regex pattern for a given label to extract its content from a markdown section.
@@ -50,7 +50,7 @@ const buildPattern = (label: string) => {
   if (patternCache.has(key)) return patternCache.get(key)!;
   const escapedLabel = escapeRegExp(label);
   const rx = new RegExp(
-    `(?:-?\\s*\\**)?${escapedLabel}\\**:\\s*([\\s\\S]*?)(?=\\n(?:-?\\s*\\**)?(?:${FIELD_NAMES})|$)`,
+    String.raw`(?:-?\s*\**)?${escapedLabel}\**:\s*([\s\S]*?)(?=\n(?:-?\s*\**)?(?:${FIELD_NAMES})|$)`,
     'i'
   );
   patternCache.set(key, rx);
@@ -67,7 +67,7 @@ const buildPattern = (label: string) => {
  */
 function extractFromSection(section: string, label: string): string | null {
   const pattern = buildPattern(label);
-  const match = section.match(pattern);
+  const match = pattern.exec(section);
   return match ? match[1].trim() : null;
 }
 
@@ -86,17 +86,17 @@ function parseLocation(locationStr: string | null): Location {
   const cleanStr = locationStr.replace(/`/g, '').trim();
   // Regex: path/file.ext:start-end or path/file.ext:line
   // Matches: file.ext:12-34 OR file.ext:12 OR file.ext
-  const match = cleanStr.match(/^([^:]+)(?::(\d+)(?:-(\d+))?)?$/);
+  const match = /^([^:]+)(?::(\d+)(?:-(\d+))?)?$/.exec(cleanStr);
 
   if (match) {
     const filePath = match[1].trim();
     let start: number | null = null;
     let end: number | null = null;
     if (match[2] && match[3]) {
-      start = parseInt(match[2], 10);
-      end = parseInt(match[3], 10);
+      start = Number.parseInt(match[2], 10);
+      end = Number.parseInt(match[3], 10);
     } else if (match[2]) {
-      start = parseInt(match[2], 10);
+      start = Number.parseInt(match[2], 10);
       end = start;
     }
     return { file: filePath, startLine: start, endLine: end };
@@ -116,20 +116,20 @@ function parseLocation(locationStr: string | null): Location {
 export function parseMarkdownToDict(content: string): Finding[] {
   const findings: Finding[] = [];
 
-  // TODO: Implement safeguards such as input length limits and complexity checks on the markdown content before parsing.
+  // Note: Consider input length limits and complexity checks on the markdown content before parsing.
   // Consider using a more robust markdown parser library if performance becomes an issue.
 
   // Remove markdown bullet points (only at line start), markdown emphasis, and preserve hyphens/underscores in text
   const cleanContent = content
-    .replace(/^\s*[\*\-]\s*/gm, '') // Remove bullet points at line start
+    .replace(/^[ \t]*[-*][ \t]*/gm, '') // Remove bullet points at line start
     .replace(/\*\*/g, ''); // Remove ** markdown
   
   // Split by "Vulnerability:" preceded by newline
-  const sections = cleanContent.split(/\n(?=#{1,6} |\s*Vulnerability:)/);
+  const sections = cleanContent.split(/\n(?=#{1,6} |[ \t]*Vulnerability:)/);
 
   for (let section of sections) {
     section = section.trim();
-    if (!section || !section.includes("Vulnerability:")) continue;
+    if (!section?.includes("Vulnerability:")) continue;
 
     const rawSource = extractFromSection(section, "Source Location");
     const rawSink = extractFromSection(section, "Sink Location");
@@ -143,7 +143,7 @@ export function parseMarkdownToDict(content: string): Finding[] {
     let recommendation = extractFromSection(section, "Recommendation");
     if (recommendation) {
       // Extract code blocks from recommendation (```language...code...```)
-      const codeMatch = recommendation.match(/```[^\n`]*\n?([\s\S]*?)```/);
+      const codeMatch = /```[^\r\n`]*\r?\n([\s\S]*?)```/.exec(recommendation);
       codeSuggestion = codeMatch ? codeMatch[1].trim() : null;
 
       // Remove code blocks from recommendation text

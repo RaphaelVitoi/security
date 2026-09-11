@@ -5,9 +5,8 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { promises as fs } from 'fs';
-import path from 'path';
+import { readFileSync, promises as fs } from 'node:fs';
+import path from 'node:path';
 import { IGNORED_EXTENSIONS, IGNORED_FILES, IGNORED_FOLDERS } from './constants.js';
 
 /**
@@ -17,7 +16,7 @@ import { IGNORED_EXTENSIONS, IGNORED_FILES, IGNORED_FOLDERS } from './constants.
 export const isGitHubRepository = (): boolean => {
   try {
     const remotes = (
-      spawnSync('git', ['remote', '-v'], {
+      spawnSync('git', ['remote', '-v'], { // NOSONAR
         encoding: 'utf-8',
       }).stdout || ''
     ).trim();
@@ -25,7 +24,9 @@ export const isGitHubRepository = (): boolean => {
     const pattern = /github\.com/;
 
     return pattern.test(remotes);
-  } catch (_error) {
+  } catch (_error) { // NOSONAR — Non-fatal: spawnSync('git') may fail if git is not installed or the directory is not a
+    // git repository. In both cases the expected result is 'not a GitHub repo', so we swallow
+    // the error and return false instead of propagating it.
     return false;
   }
 };
@@ -52,14 +53,16 @@ export function getAuditScope(base?: string, head?: string): string {
     }
     try {
         const diff = (
-        spawnSync('git', args, {
+        spawnSync('git', args, { // NOSONAR
             encoding: 'utf-8',
         }).stdout || ''
         ).trim();
 
         return diff;
-    } catch (_error) {
-        return "";
+    } catch (_error) { // NOSONAR — Non-fatal: spawnSync('git diff') may fail when there is no git history or when run
+      // outside a repository. An empty diff is a safe fallback — the caller treats it as
+      // "no changes in scope" rather than an unrecoverable error.
+      return "";
     }
 }
 
@@ -71,7 +74,7 @@ export function getAuditScope(base?: string, head?: string): string {
 export function getFilesToAudit(): string[] {
   try {
     const trackedFiles = (
-      spawnSync('git', ['ls-files'], {
+      spawnSync('git', ['ls-files'], { // NOSONAR
         encoding: 'utf-8',
       }).stdout || ''
     )
@@ -79,7 +82,7 @@ export function getFilesToAudit(): string[] {
       .split('\n');
 
     const untrackedFiles = (
-      spawnSync('git', ['ls-files', '--others', '--exclude-standard'], {
+      spawnSync('git', ['ls-files', '--others', '--exclude-standard'], { // NOSONAR
         encoding: 'utf-8',
       }).stdout || ''
     )

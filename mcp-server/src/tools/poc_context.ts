@@ -5,8 +5,8 @@
  */
 
 import { z } from 'zod';
-import { promises as fs } from 'fs';
-import path from 'path';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import { SECURITY_DIR_NAME, POC_DIR_NAME, PATH_TRAVERSAL_TEMP_FILE } from '../constants.js';
 import { VulnerabilityType } from '../knowledge.js';
 import { detectProjectLanguage } from '../filesystem.js';

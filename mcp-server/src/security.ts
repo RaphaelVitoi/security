@@ -5,8 +5,32 @@
  */
 
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { promises as fs } from 'fs';
-import path from 'path';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+
+interface SecurityDependencies {
+  fs: typeof fs;
+  path: typeof path;
+}
+
+const DEFAULT_DEPS: SecurityDependencies = { fs, path };
+
+function matchSnippetAt(
+  lines: string[],
+  potentialStartLine: number,
+  snippetLines: string[]
+): boolean {
+  for (let j = 1; j < snippetLines.length; j++) {
+    const fileLineIndex = potentialStartLine - 1 + j;
+    if (
+      fileLineIndex >= lines.length ||
+      lines[fileLineIndex].trim() !== snippetLines[j].trim()
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
 
 export async function findLineNumbers(
   {
@@ -16,7 +40,7 @@ export async function findLineNumbers(
     filePath: string;
     snippet: string;
   },
-  dependencies: { fs: typeof fs; path: typeof path } = { fs, path }
+  dependencies: SecurityDependencies = DEFAULT_DEPS
 ): Promise<CallToolResult> {
   try {
     const CWD = process.cwd();
@@ -63,24 +87,12 @@ export async function findLineNumbers(
     }
 
     const firstSnippetLine = snippetLines[0].trim();
-    if (lineToNumbers.has(firstSnippetLine)) {
-      for (const potentialStartLine of lineToNumbers.get(firstSnippetLine)!) {
-        let matchFound = true;
-        for (let j = 1; j < snippetLineCount; j++) {
-          const fileLineIndex = potentialStartLine - 1 + j;
-          if (
-            fileLineIndex >= lines.length ||
-            lines[fileLineIndex].trim() !== snippetLines[j].trim()
-          ) {
-            matchFound = false;
-            break;
-          }
-        }
-        if (matchFound) {
-          startLine = potentialStartLine;
-          endLine = potentialStartLine + snippetLineCount - 1;
-          break;
-        }
+    const candidateLines = lineToNumbers.get(firstSnippetLine) ?? [];
+    for (const potentialStartLine of candidateLines) {
+      if (matchSnippetAt(lines, potentialStartLine, snippetLines)) {
+        startLine = potentialStartLine;
+        endLine = potentialStartLine + snippetLineCount - 1;
+        break;
       }
     }
 

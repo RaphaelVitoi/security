@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import path from 'path';
+import path from 'node:path';
 
 export const SECURITY_DIR_NAME = '.gemini_security';
 export const POC_DIR_NAME = 'poc';

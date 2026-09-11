@@ -4,15 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { promises as fs } from 'fs';
-import path from 'path';
-import { exec, execFile } from 'child_process';
-import { promisify } from 'util';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import { exec, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { POC_DIR, PATH_TRAVERSAL_TEMP_FILE } from './constants.js';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-
 
 export interface RunPocResult {
   stdout: string;
@@ -21,13 +20,142 @@ export interface RunPocResult {
   isSecurityError?: boolean;
 }
 
+interface PocDependencies {
+  fs: typeof fs;
+  path: typeof path;
+  execAsync: typeof execAsync;
+  execFileAsync: typeof execFileAsync;
+}
+
+const DEFAULT_POC_DEPS: PocDependencies = {
+  fs,
+  path,
+  execAsync,
+  execFileAsync,
+};
+
+interface RunnerConfig {
+  runCmd: string;
+  runArgs: string[];
+  installCmd: string | null;
+}
+
+async function setupPythonRunner(
+  filePath: string,
+  pocDir: string,
+  deps: PocDependencies
+): Promise<RunnerConfig> {
+  const venvDir = deps.path.join(pocDir, '.venv');
+  const isWindows = process.platform === 'win32';
+  const pythonBin = isWindows
+    ? deps.path.join(venvDir, 'Scripts', 'python.exe')
+    : deps.path.join(venvDir, 'bin', 'python');
+
+  try {
+    await deps.fs.access(pythonBin);
+  } catch {
+    try {
+      await deps.execAsync(`python3 -m venv "${venvDir}"`);
+    } catch {
+      await deps.execAsync(`python -m venv "${venvDir}"`);
+    }
+  }
+
+  const projectRoot = process.cwd();
+  const checkExists = async (p: string) =>
+    deps.fs.access(p).then(() => true).catch(() => false);
+
+  const hasProjectPyproject = await checkExists(deps.path.join(projectRoot, 'pyproject.toml'));
+  const hasProjectRequirements = await checkExists(deps.path.join(projectRoot, 'requirements.txt'));
+
+  if (hasProjectPyproject) {
+    await deps.execAsync(`"${pythonBin}" -m pip install -e "${projectRoot}"`).catch(() => { });
+  } else if (hasProjectRequirements) {
+    await deps.execAsync(`"${pythonBin}" -m pip install -r "${deps.path.join(projectRoot, 'requirements.txt')}"`).catch(() => { });
+  }
+
+  const hasPocPyproject = await checkExists(deps.path.join(pocDir, 'pyproject.toml'));
+  const hasPocRequirements = await checkExists(deps.path.join(pocDir, 'requirements.txt'));
+
+  if (hasPocPyproject) {
+    await deps.execAsync(`"${pythonBin}" -m pip install .`, { cwd: pocDir }).catch(() => { });
+  }
+  if (hasPocRequirements) {
+    await deps.execAsync(`"${pythonBin}" -m pip install -r requirements.txt`, { cwd: pocDir }).catch(() => { });
+  }
+
+  return {
+    runCmd: pythonBin,
+    runArgs: [filePath],
+    installCmd: null,
+  };
+}
+
+async function setupGoRunner(
+  filePath: string,
+  pocDir: string,
+  deps: PocDependencies
+): Promise<RunnerConfig> {
+  const hasGoMod = await deps.fs.access(deps.path.join(pocDir, 'go.mod')).then(() => true).catch(() => false);
+  if (!hasGoMod) {
+    await deps.execAsync('go mod init poc', { cwd: pocDir }).catch(() => { });
+  }
+  return {
+    runCmd: 'go',
+    runArgs: ['run', filePath],
+    installCmd: 'go mod tidy',
+  };
+}
+
+function setupNodeRunner(filePath: string, ext: string): RunnerConfig {
+  if (ext === '.ts') {
+    return {
+      runCmd: 'npx',
+      runArgs: ['ts-node', filePath],
+      installCmd: null,
+    };
+  }
+  return {
+    runCmd: 'node',
+    runArgs: [filePath],
+    installCmd: null,
+  };
+}
+
+async function executeWithPythonRetry(
+  runCmd: string,
+  runArgs: string[],
+  execOptions: any,
+  ext: string,
+  pocDir: string,
+  deps: PocDependencies
+): Promise<{ stdout: string; stderr: string }> {
+  try {
+    return (await deps.execFileAsync(runCmd, runArgs, execOptions)) as unknown as { stdout: string; stderr: string };
+  } catch (error: any) {
+    const errorMessage = error.message || '';
+    const errorOutput = (error.stdout || '') + (error.stderr || '');
+
+    if (ext === '.py' && (errorMessage.includes('ModuleNotFoundError') || errorOutput.includes('ModuleNotFoundError'))) {
+      const venvDir = deps.path.join(pocDir, '.venv');
+      try {
+        await deps.execAsync(`python3 -m venv --system-site-packages "${venvDir}"`);
+      } catch {
+        await deps.execAsync(`python -m venv --system-site-packages "${venvDir}"`);
+      }
+      return (await deps.execFileAsync(runCmd, runArgs, execOptions)) as unknown as { stdout: string; stderr: string };
+    }
+    throw error;
+  }
+}
+
 export async function runPoc(
   {
     filePath,
   }: {
     filePath: string;
   },
-  dependencies: { fs: typeof fs; path: typeof path; execAsync: typeof execAsync; execFileAsync: typeof execFileAsync } = { fs, path, execAsync, execFileAsync }
+  dependencies: PocDependencies = DEFAULT_POC_DEPS
 ): Promise<RunPocResult> {
   try {
     const pocDir = dependencies.path.dirname(filePath);
@@ -54,72 +182,16 @@ export async function runPoc(
 
     const ext = dependencies.path.extname(filePath).toLowerCase();
 
-    let installCmd: string | null = null;
-    let runCmd: string;
-    let runArgs: string[];
-
+    let runnerConfig: RunnerConfig;
     if (ext === '.py') {
-      const venvDir = dependencies.path.join(pocDir, '.venv');
-      const isWindows = process.platform === 'win32';
-      const pythonBin = isWindows
-        ? dependencies.path.join(venvDir, 'Scripts', 'python.exe')
-        : dependencies.path.join(venvDir, 'bin', 'python');
-
-      try {
-        await dependencies.fs.access(pythonBin);
-      } catch {
-        try {
-          await dependencies.execAsync(`python3 -m venv "${venvDir}"`);
-        } catch {
-          await dependencies.execAsync(`python -m venv "${venvDir}"`);
-        }
-      }
-
-      runCmd = pythonBin;
-      runArgs = [filePath];
-
-      const projectRoot = process.cwd();
-      const checkExists = async (p: string) =>
-        dependencies.fs.access(p).then(() => true).catch(() => false);
-
-      const hasProjectPyproject = await checkExists(dependencies.path.join(projectRoot, 'pyproject.toml'));
-      const hasProjectRequirements = await checkExists(dependencies.path.join(projectRoot, 'requirements.txt'));
-
-      if (hasProjectPyproject) {
-        await dependencies.execAsync(`"${pythonBin}" -m pip install -e "${projectRoot}"`).catch(() => { });
-      } else if (hasProjectRequirements) {
-        await dependencies.execAsync(`"${pythonBin}" -m pip install -r "${dependencies.path.join(projectRoot, 'requirements.txt')}"`).catch(() => { });
-      }
-
-      const hasPocPyproject = await checkExists(dependencies.path.join(pocDir, 'pyproject.toml'));
-      const hasPocRequirements = await checkExists(dependencies.path.join(pocDir, 'requirements.txt'));
-
-      if (hasPocPyproject) {
-        await dependencies.execAsync(`"${pythonBin}" -m pip install .`, { cwd: pocDir }).catch(() => { });
-      }
-      if (hasPocRequirements) {
-        await dependencies.execAsync(`"${pythonBin}" -m pip install -r requirements.txt`, { cwd: pocDir }).catch(() => { });
-      }
+      runnerConfig = await setupPythonRunner(filePath, pocDir, dependencies);
     } else if (ext === '.go') {
-      runCmd = 'go';
-      runArgs = ['run', filePath];
-
-      const hasGoMod = await dependencies.fs.access(dependencies.path.join(pocDir, 'go.mod')).then(() => true).catch(() => false);
-      if (!hasGoMod) {
-        await dependencies.execAsync('go mod init poc', { cwd: pocDir }).catch(() => { });
-      }
-
-      installCmd = 'go mod tidy';
+      runnerConfig = await setupGoRunner(filePath, pocDir, dependencies);
     } else {
-      if (ext === '.ts') {
-        runCmd = 'npx';
-        runArgs = ['ts-node', filePath];
-      } else {
-        runCmd = 'node';
-        runArgs = [filePath];
-      }
-      installCmd = null;
+      runnerConfig = setupNodeRunner(filePath, ext);
     }
+
+    const { runCmd, runArgs, installCmd } = runnerConfig;
 
     if (installCmd) {
       try {
@@ -140,35 +212,14 @@ export async function runPoc(
       };
     }
 
-    try {
-      output = (await dependencies.execFileAsync(runCmd, runArgs, execOptions)) as unknown as { stdout: string; stderr: string };
-    } catch (error: any) {
-      const errorMessage = error.message || '';
-      const errorOutput = (error.stdout || '') + (error.stderr || '');
-
-      // If we are running a Python script in a venv and it fails due to missing modules,
-      // try enabling system site packages for the venv and retry.
-      if (ext === '.py' && (errorMessage.includes('ModuleNotFoundError') || errorOutput.includes('ModuleNotFoundError'))) {
-        try {
-          const venvDir = dependencies.path.join(pocDir, '.venv');
-          // Update the venv to include system site packages
-          try {
-            await dependencies.execAsync(`python3 -m venv --system-site-packages "${venvDir}"`);
-          } catch {
-            await dependencies.execAsync(`python -m venv --system-site-packages "${venvDir}"`);
-          }
-
-          output = (await dependencies.execFileAsync(runCmd, runArgs, execOptions)) as unknown as { stdout: string; stderr: string };
-        } catch (retryError: any) {
-          // If retry fails, throw the original error (or the retry error if it's new/different)
-          throw retryError;
-        }
-      } else {
-        throw error;
-      }
-    }
-
-    const { stdout, stderr } = output;
+    const { stdout, stderr } = await executeWithPythonRetry(
+      runCmd,
+      runArgs,
+      execOptions,
+      ext,
+      pocDir,
+      dependencies
+    );
 
     return { stdout, stderr };
   } catch (error) {
